@@ -6,9 +6,12 @@ import subprocess
 import threading
 import urlparse
 
-## FIXME:  These should go into a config file.
-RPM_REPO_COMMIT_PATH = '/srv/release/repository/release/yum/builds/eucalyptus/commit/'
-RPM_REPO_COMMIT_HTTP = 'http://192.168.51.243/yum/builds/eucalyptus/commit/'
+# Since the only way we can have two commits with the same ID is by causing
+# SHA1 to collide, we ignore that scenario and simply check each possible
+# location in turn until we find one with a matching commit ID.
+## FIXME:  This should go into a config file.
+RPM_LOCATIONS = {'/srv/release/repository/release/yum/builds/eucalyptus/commit/': 'http://192.168.51.243/yum/builds/eucalyptus/commit/',
+                 '/srv/release/repository/release/yum/builds/enterprise/commit/': 'http://192.168.51.243/yum/builds/enterprise/commit/'}
 
 BRANCH_COMMITS = {}
 BRANCH_COMMITS_LOCK = threading.Lock()
@@ -63,14 +66,13 @@ def generate_deb_repo(distro, releasever, arch, url, commit):
     return 'Error: not implemented', 501
 
 def find_rpm_repo_dir(commit):
-    matches = [dir for dir in os.listdir(RPM_REPO_COMMIT_PATH)
-               if dir.startswith(commit)]
-    if len(matches) == 0:
-        return (RPM_REPO_COMMIT_PATH, None)
-    elif len(matches) == 1:
-        return (RPM_REPO_COMMIT_PATH, matches[0])
-    else:
-        raise KeyError('Ref "%s" matches multiple package dir names' % commit)
+    for path in RPM_LOCATIONS.iterkeys():
+        matches = [dir for dir in os.listdir(path) if dir.startswith(commit)]
+        if len(matches) == 1:
+            return (path, matches[0])
+        elif len(matches) > 1:
+            raise KeyError('Ref "%s" matches multiple package dirs' % commit)
+    return (None, None)
 
 def find_rpm_repo_by_commit(distro, releasever, arch, url, commit):
     # Quick sanity checks
@@ -91,7 +93,7 @@ def find_rpm_repo_by_commit(distro, releasever, arch, url, commit):
         ospath = os.path.sep.join((distro, releasever, arch))
         if os.path.exists(os.path.join(basedir, commitdir, ospath)):
             cos_path = '/'.join((commitdir, ospath))
-            return urlparse.urljoin(RPM_REPO_COMMIT_HTTP, cos_path), 200
+            return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
         else:
             errmsg = ('Error: repo for commit %s exists, but not for %s' %
                       (commitdir, ospath))
@@ -119,15 +121,15 @@ def find_rpm_repo_by_branch(distro, releasever, arch, url, branch):
         if commitdir:
             # Try the latest commit
             if os.path.exists(os.path.join(basedir, commitdir, ospath)):
-                BRANCH_COMMITS[branch] = ref
+                BRANCH_COMMITS[branch] = (basedir, commitdir)
                 cos_path = '/'.join((commitdir, ospath))
-                return urlparse.urljoin(RPM_REPO_COMMIT_HTTP, cos_path), 200
+                return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
         if branch in BRANCH_COMMITS:
             # Try the last known commit
-            commit = BRANCH_COMMITS[branch]
-            cos_path = '/'.join((commit, ospath))
-            if os.path.exists(os.path.join(basedir, commit, ospath)):
-                return urlparse.urljoin(RPM_REPO_COMMIT_HTTP, cos_path), 200
+            (basedir, commitdir) = BRANCH_COMMITS[branch]
+            cos_path = '/'.join((commitdir, ospath))
+            if os.path.exists(os.path.join(basedir, cos_path)):
+                return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
         return ('Error: no repo found for branch %s on platform %s' %
                 (branch, ospath), 404)
 
