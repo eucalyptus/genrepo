@@ -10,8 +10,8 @@ import urlparse
 # SHA1 to collide, we ignore that scenario and simply check each possible
 # location in turn until we find one with a matching commit ID.
 ## FIXME:  This should go into a config file.
-RPM_LOCATIONS = {'/srv/release/repository/release/yum/builds/eucalyptus/commit/': 'http://192.168.51.243/yum/builds/eucalyptus/commit/',
-                 '/srv/release/repository/release/yum/builds/enterprise/commit/': 'http://192.168.51.243/yum/builds/enterprise/commit/'}
+RPM_FS_BASE   = '/srv/release/repository/release/yum/builds'
+RPM_HTTP_BASE = 'http://192.168.51.243/yum/builds/'
 
 BRANCH_COMMITS = {}
 BRANCH_COMMITS_LOCK = threading.Lock()
@@ -46,35 +46,36 @@ def get_git_pkgs():
     releasever = params.get('releasever')
     arch       = params.get('arch')
     url        = params.get('url')
-    commit     = params.get('commit')
-    branch     = params.get('branch')
+    ref        = params.get('ref') or params.get('commit') or params.get('branch')
+    allow_old  = 'allow-old' in params
     if distro.lower() in ['rhel', 'centos']:
-        if commit:
-            return find_rpm_repo_by_commit(distro, releasever, arch, url, commit)
-        elif branch:
-            return find_rpm_repo_by_branch(distro, releasever, arch, url, branch)
+        if ref:
+            return find_rpm_repo(distro, releasever, arch, url, ref, allow_old)
         else:
-            return 'Error: either "commit" or "branch" must be specified', 400
+            return 'Error: missing or empty paramster "ref"', 400
     elif distro.lower() in ['debian', 'ubuntu']:
-        if not commit:
-            return 'Error: missing or empty parameter "commit"', 400
-        return generate_deb_repo(distro, releasever, arch, url, commit)
+        if ref:
+            return generate_deb_repo(distro, releasever, arch, url, ref,
+                                     allow_old)
+        else:
+            return 'Error: missing or empty parameter "ref"', 400
     else:
         return 'Error: unknown distro "%s"' % distro, 400
 
-def generate_deb_repo(distro, releasever, arch, url, commit):
+def generate_deb_repo(distro, releasever, arch, url, ref, allow_old=False):
     return 'Error: not implemented', 501
 
 def find_rpm_repo_dir(commit):
-    for path in RPM_LOCATIONS.iterkeys():
+    for project in os.listdir(RPM_FS_BASE):
+        path = os.path.join(RPM_FS_BASE, project, 'commit')
         matches = [dir for dir in os.listdir(path) if dir.startswith(commit)]
         if len(matches) == 1:
-            return (path, matches[0])
+            return os.path.sep.join((project, 'commit', matches[0]))
         elif len(matches) > 1:
             raise KeyError('Ref "%s" matches multiple package dirs' % commit)
-    return (None, None)
+    return None
 
-def find_rpm_repo_by_commit(distro, releasever, arch, url, commit):
+def find_rpm_repo(distro, releasever, arch, url, ref, allow_old=False):
     # Quick sanity checks
     if arch == 'amd64':
         return 'Error: bad arch "amd64"; try "x86_64" instead', 400
@@ -84,35 +85,8 @@ def find_rpm_repo_by_commit(distro, releasever, arch, url, commit):
         releasever = releasever[0]
 
     try:
-        ref = resolve_git_ref(url, commit)
-        (basedir, commitdir) = find_rpm_repo_dir(ref)
-    except KeyError as err:
-        return 'Error: %s' % err.msg, 412
-
-    if commitdir:
-        ospath = os.path.sep.join((distro, releasever, arch))
-        if os.path.exists(os.path.join(basedir, commitdir, ospath)):
-            cos_path = '/'.join((commitdir, ospath))
-            return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
-        else:
-            errmsg = ('Error: repo for commit %s exists, but not for %s' %
-                      (commitdir, ospath))
-            return errmsg, 404
-    else:
-        return 'Error: repo for ref %s does not exist' % ref, 404
-
-def find_rpm_repo_by_branch(distro, releasever, arch, url, branch):
-    # Quick sanity checks
-    if arch == 'amd64':
-        return 'Error: bad arch "amd64"; try "x86_64" instead', 400
-    elif arch not in ['i386', 'x86_64']:
-        return 'Error: bad arch "%s"' % arch, 400
-    if distro == 'rhel' and any(releasever.startswith(n) for n in ('5', '6')):
-        releasever = releasever[0]
-
-    try:
-        ref = resolve_git_ref(url, branch)
-        (basedir, commitdir) = find_rpm_repo_dir(ref)
+        commit = resolve_git_ref(url, ref)
+        commitdir = find_rpm_repo_dir(commit)
     except KeyError as err:
         return 'Error: %s' % err.msg, 412
 
@@ -120,18 +94,18 @@ def find_rpm_repo_by_branch(distro, releasever, arch, url, branch):
         ospath = os.path.sep.join((distro, releasever, arch))
         if commitdir:
             # Try the latest commit
-            if os.path.exists(os.path.join(basedir, commitdir, ospath)):
-                BRANCH_COMMITS[branch] = (basedir, commitdir)
+            if os.path.exists(os.path.join(RPM_FS_BASE, commitdir, ospath)):
+                BRANCH_COMMITS[ref] = commitdir
                 cos_path = '/'.join((commitdir, ospath))
-                return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
-        if branch in BRANCH_COMMITS:
+                return urlparse.urljoin(RPM_HTTP_BASE, cos_path), 200
+        elif allow_old and ref in BRANCH_COMMITS:
             # Try the last known commit
-            (basedir, commitdir) = BRANCH_COMMITS[branch]
+            commitdir = BRANCH_COMMITS[ref]
             cos_path = '/'.join((commitdir, ospath))
             if os.path.exists(os.path.join(basedir, cos_path)):
-                return urlparse.urljoin(RPM_LOCATIONS[basedir], cos_path), 200
-        return ('Error: no repo found for branch %s on platform %s' %
-                (branch, ospath), 404)
+                return urlparse.urljoin(RPM_HTTP_BASE, cos_path), 200
+        return ('Error: no repo found for ref %s on platform %s' %
+                (ref, ospath), 404)
 
 def resolve_git_ref(url, ref):
     matches = set()
@@ -151,15 +125,6 @@ def resolve_git_ref(url, ref):
         return tuple(matches)[0]
     else:
         raise KeyError('Ref "%s" matches multiple objects' % ref)
-
-def find_yum_repo(ref):
-    matches = [dir for dir in os.listdir(RPM_REPO_BASE) if dir.startswith(ref)]
-    if len(matches) == 0:
-        return (RPM_REPO_BASE, None)
-    elif len(matches) == 1:
-        return (RPM_REPO_BASE, matches[0])
-    else:
-        raise KeyError('Ref "%s" matches multiple package dir names' % ref)
 
 if __name__ == '__main__':
     app.debug = False
