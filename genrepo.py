@@ -66,13 +66,19 @@ def generate_deb_repo(distro, releasever, arch, url, ref, allow_old=False):
     return 'Error: not implemented', 501
 
 def find_rpm_repo_dir(commit):
+    matches = []
     for project in os.listdir(RPM_FS_BASE):
         path = os.path.join(RPM_FS_BASE, project, 'commit')
-        matches = [dir for dir in os.listdir(path) if dir.startswith(commit)]
-        if len(matches) == 1:
-            return os.path.sep.join((project, 'commit', matches[0]))
-        elif len(matches) > 1:
-            raise KeyError('Ref "%s" matches multiple package dirs' % commit)
+        matches.extend((dir, project) for dir in os.listdir(path)
+                       if dir.startswith(commit))
+    # Find the number of distinct commits that we matched
+    n_matching_commits = len(set(match[0][:40] for match in matches))
+    if n_matching_commits == 1:
+        # latest NNN of all 'd1e524d09fab1e3498c84c26b264257496df6c4d-NNN'
+        (latest_matching_build, project) = sorted(matches)[-1]
+        return os.path.sep.join((project, 'commit', latest_matching_build))
+    elif n_matching_commits > 1:
+        raise KeyError('Ref "%s" matches multiple commits' % commit)
     return None
 
 def find_rpm_repo(distro, releasever, arch, url, ref, allow_old=False):
