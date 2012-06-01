@@ -1,5 +1,10 @@
 #!/usr/bin/python -tt
 
+import os
+import gzip
+import apt
+import commands
+import time
 from flask import Flask, request
 import os.path
 import subprocess
@@ -12,6 +17,7 @@ import urlparse
 ## FIXME:  This should go into a config file.
 RPM_FS_BASE   = '/srv/release/repository/release/yum/builds'
 RPM_HTTP_BASE = 'http://192.168.51.243/yum/builds/'
+repo_dir = "/srv/release/repository/release/"
 
 BRANCH_COMMITS = {}
 BRANCH_COMMITS_LOCK = threading.Lock()
@@ -62,8 +68,113 @@ def get_git_pkgs():
     else:
         return 'Error: unknown distro "%s"' % distro, 400
 
-def generate_deb_repo(distro, releasever, arch, url, ref, allow_old=False):
-    return 'Error: not implemented', 501
+def generate_deb_repo(distro, release, arch, url, commit="", allow_old=False):
+    package_name = ""
+    if distro not in ['ubuntu']:
+        return "Error: Invalid distro.", 400
+    if release not in ['lucid','precise']:
+        return "Error: Invalid release.", 400
+    if url.endswith("eucalyptus"):
+        package_name = "eucalyptus"
+    elif url.endswith("internal"):
+        package_name = "eucalyptus-enterprise"
+    else:
+        return "Error: Invalid URL. Please end your URL with 'eucalyptus' or 'internal'", 400
+
+    #If no hash is specified, grab latest version and determine its hash
+    if commit == "" or commit == "master":
+        sources = repo_dir + distro +  "/dists/" + release + "/main/source/Sources.gz"
+        f = gzip.open(sources,'rb')
+        data = f.read()
+        f.close()
+        latest_ver = ""
+        for section in data.split("\n\n"):
+            if section.startswith("Package: " + package_name + "\n"):
+                lines = section.split("\n")
+                for line in lines:
+                    if line.startswith("Version"):
+                        key,val = line.split(": ")
+                        latest_ver = val
+                        break
+        #We should have the latest version set at this point, but we won't if
+        #user specified an invalid distro or release. Bail!
+        if latest_ver == "":
+            return "Error: Something whacky happened - unable to determine package version.", 400
+        #Parse the version to obtain the git hash.  This will be used for the new
+        #repo name
+        fields = latest_ver.split(".")
+        commit = fields[-1][3:]
+
+    #if QA passes us an entire commit ID, truncate
+    elif len(commit) > 6:
+        commit = commit[0:6]
+
+    pool = repo_dir + distro + "/pool/main/e/" + package_name + "/"
+    pool_contents = os.listdir(pool)
+    current_high_ver = "0"
+    counter = 0
+    for euca_file in pool_contents:
+        if (commit in euca_file) and (euca_file.endswith(".deb")) and (release in euca_file):
+            #Now determine the newest one
+            fields = euca_file.split("_")
+            euca_file_ver = fields[1]
+            vc = apt.VersionCompare(euca_file_ver,current_high_ver)
+            if (vc >= 1):
+              current_high_ver = euca_file_ver
+            counter = counter + 1
+
+    #euclyptus has 10 binary packages (java-common may go away) and internal has 4 + a dummy package
+    #if we have less than that, bail, as an invalid hash has been detected
+    if package_name == "eucalyptus":
+        if counter < 9:
+            return "Error: You have requested a hash that does not exist in this distro/release.", 400
+    else:
+        if counter < 4:
+            return "Error: You have requested a hash that does not exist in this distro/release.", 400
+
+    current_repo_name = ""
+    existing_repo = 0
+    if not os.path.isdir(repo_dir + distro + "/dists/" + release + "-" + commit):
+        #Generate the repository
+        retval = os.system("generate-eucalyptus-repository" + " " + distro + " " + release + " " + commit)
+        #This shouldn't fail, but if it does, bail
+        if retval != 0:
+            return "Error: Failed to generate the repository!", 400
+        current_repo_name = release + "-" + commit
+    else:
+        #At least one repo with debs containing this hashed build exists
+        #Check to see if package build being requested exists in a repo already
+        cmd = "ls -1 " + repo_dir + distro +  "/dists/" + release + "-" + commit + "*" + "/main/binary-amd64/Packages"
+        packages_files = commands.getoutput(cmd).split("\n")
+        for packages_file in packages_files:
+            fbuffer = open(packages_file)
+            data = fbuffer.read()
+            fbuffer.close()
+            if "Version: " + current_high_ver in data:
+                loffset = packages_file.find(release)
+                roffset = packages_file.find("/main")
+                current_repo_name = packages_file[loffset:roffset] 
+                existing_repo = 1
+                break
+
+    if current_repo_name == "":
+        #repo(s) for hash exists, but a newer package exists. create a new repo with hash+timestamp
+        timestamp = str(int(time.time()))
+        #Generate the repository
+        retval = os.system("generate-eucalyptus-repository" + " " + distro + " " + release + " " + commit + "-" + timestamp)
+        #This shouldn't fail, but if it does, bail
+        if retval != 0:
+            return "Error: Failed to generate the repository!", 400
+        current_repo_name = release + "-" + commit + "-" + timestamp
+
+    if existing_repo == 0:
+        for euca_file in pool_contents:
+            if (current_high_ver in euca_file) and (release in euca_file) and (euca_file.endswith(".deb")):
+                retval = os.system("reprepro --keepunreferencedfiles -V -b " + repo_dir + distro + " includedeb " + current_repo_name + " " + pool + euca_file)
+                if retval != 0:
+                    return "Error: Failed to add DEBs to new repo!", 400
+    #Return the repo information
+    return "deb http://192.168.51.243/ubuntu/ " + current_repo_name + " " + "main", 200
 
 def find_rpm_repo_dir(commit):
     matches = []
