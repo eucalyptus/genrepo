@@ -68,6 +68,7 @@ def get_git_pkgs():
     else:
         return 'Error: unknown distro "%s"' % distro, 400
 
+
 def generate_deb_repo(distro, release, arch, url, commit="", allow_old=False):
     package_name = ""
     if distro not in ['ubuntu']:
@@ -132,47 +133,20 @@ def generate_deb_repo(distro, release, arch, url, commit="", allow_old=False):
         if counter < 4:
             return "Error: You have requested a hash that does not exist in this distro/release.", 400
 
-    current_repo_name = ""
-    existing_repo = 0
-    if not os.path.isdir(repo_dir + distro + "/dists/" + release + "-" + commit):
-        #Generate the repository
-        retval = os.system("generate-eucalyptus-repository" + " " + distro + " " + release + " " + commit)
-        #This shouldn't fail, but if it does, bail
-        if retval != 0:
-            return "Error: Failed to generate the repository!", 400
-        current_repo_name = release + "-" + commit
-    else:
-        #At least one repo with debs containing this hashed build exists
-        #Check to see if package build being requested exists in a repo already
-        cmd = "ls -1 " + repo_dir + distro +  "/dists/" + release + "-" + commit + "*" + "/main/binary-amd64/Packages"
-        packages_files = commands.getoutput(cmd).split("\n")
-        for packages_file in packages_files:
-            fbuffer = open(packages_file)
-            data = fbuffer.read()
-            fbuffer.close()
-            if "Version: " + current_high_ver in data:
-                loffset = packages_file.find(release)
-                roffset = packages_file.find("/main")
-                current_repo_name = packages_file[loffset:roffset] 
-                existing_repo = 1
-                break
+    #Generate the repository
+    time.sleep(1)
+    timestamp = str(int(time.time()))
+    retval = os.system("generate-eucalyptus-repository" + " " + distro + " " + release + " " + commit + "-" + timestamp)
+    #This shouldn't fail, but if it does, bail
+    if retval != 0:
+        return "Error: Failed to generate the repository!", 400
+    current_repo_name = release + "-" + commit + "-" + timestamp
 
-    if current_repo_name == "":
-        #repo(s) for hash exists, but a newer package exists. create a new repo with hash+timestamp
-        timestamp = str(int(time.time()))
-        #Generate the repository
-        retval = os.system("generate-eucalyptus-repository" + " " + distro + " " + release + " " + commit + "-" + timestamp)
-        #This shouldn't fail, but if it does, bail
-        if retval != 0:
-            return "Error: Failed to generate the repository!", 400
-        current_repo_name = release + "-" + commit + "-" + timestamp
-
-    if existing_repo == 0:
-        for euca_file in pool_contents:
-            if (current_high_ver in euca_file) and (release in euca_file) and (euca_file.endswith(".deb")):
-                retval = os.system("reprepro --keepunreferencedfiles -V -b " + repo_dir + distro + " includedeb " + current_repo_name + " " + pool + euca_file)
-                if retval != 0:
-                    return "Error: Failed to add DEBs to new repo!", 400
+    for euca_file in pool_contents:
+        if (current_high_ver in euca_file) and (release in euca_file) and (euca_file.endswith(".deb")):
+            retval = os.system("reprepro --keepunreferencedfiles -V -b " + repo_dir + distro + " includedeb " + current_repo_name + " " + pool + euca_file)
+            if retval != 0:
+                return "Error: Failed to add DEBs to new repo!", 400
     #Return the repo information
     return "deb http://192.168.51.243/ubuntu/ " + current_repo_name + " " + "main", 200
 
