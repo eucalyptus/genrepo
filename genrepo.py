@@ -51,7 +51,7 @@ def get_git_pkgs():
     releasever = params.get('releasever')
     arch       = params.get('arch')
     url        = params.get('url')
-    ref        = params.get('ref') or params.get('commit') or params.get('branch')
+    ref        = params.get('ref')
     allow_old  = 'allow-old' in params
     if distro.lower() in ['rhel', 'centos']:
         if ref:
