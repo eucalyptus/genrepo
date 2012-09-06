@@ -71,9 +71,9 @@ def get_git_pkgs():
 
 def generate_deb_repo(distro, release, arch, url, commit="", allow_old=False):
     package_name = ""
-    if distro not in ['ubuntu']:
+    if distro not in ['ubuntu','debian']:
         return "Error: Invalid distro.", 400
-    if release not in ['lucid','precise']:
+    if release not in ['lucid','precise','sid']:
         return "Error: Invalid release.", 400
     if url.endswith("eucalyptus"):
         package_name = "eucalyptus"
