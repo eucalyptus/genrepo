@@ -134,7 +134,7 @@ def generate_deb_repo(distro, release, arch, url, commit, allow_old=False):
                      'main')), 201
 
 
-def find_rpm_repo_dir(commit):
+def find_rpm_repo_dirs(commit):
     matches = []
     for project in os.listdir(RPM_FS_BASE):
         path = os.path.join(RPM_FS_BASE, project, 'commit')
@@ -143,12 +143,13 @@ def find_rpm_repo_dir(commit):
     # Find the number of distinct commits that we matched
     n_matching_commits = len(set(match[0][:40] for match in matches))
     if n_matching_commits == 1:
-        # latest NNN of all 'd1e524d09fab1e3498c84c26b264257496df6c4d-NNN'
-        (latest_matching_build, project) = sorted(matches)[-1]
-        return os.path.sep.join((project, 'commit', latest_matching_build))
+        # All 'd1e524d09fab1e3498c84c26b264257496df6c4d-FOO', from last FOO
+        # to first
+        for build, project in sorted(matches, reverse=True):
+            yield os.path.sep.join((project, 'commit', build))
     elif n_matching_commits > 1:
         raise KeyError('Ref "%s" matches multiple commits' % commit)
-    return None
+    # Fall through with no results
 
 def find_rpm_repo(distro, releasever, arch, url, commit, allow_old=False):
     # Quick sanity checks
@@ -161,14 +162,13 @@ def find_rpm_repo(distro, releasever, arch, url, commit, allow_old=False):
 
     try:
         commit = resolve_git_ref(url, commit)
-        commitdir = find_rpm_repo_dir(commit)
+        commitdirs = find_rpm_repo_dirs(commit)
     except KeyError as err:
         return 'Error: %s' % err.msg, 412
 
     with BRANCH_COMMITS_LOCK:
         ospath = os.path.sep.join((distro, releasever, arch))
-        if commitdir:
-            # Try the latest commit
+        for commitdir in commitdirs:
             if os.path.exists(os.path.join(RPM_FS_BASE, commitdir, ospath)):
                 BRANCH_COMMITS[ref] = commitdir
                 cos_path = '/'.join((commitdir, ospath))
