@@ -53,63 +53,39 @@ def get_git_pkgs():
     url        = params.get('url')
     ref        = params.get('ref')
     allow_old  = 'allow-old' in params
+
+    if ref:
+        try:
+            commit = resolve_git_ref(url, ref)
+        except KeyError as exc:
+            return 'Error: ' + exc.message, 412
+    else:
+        return 'Error: missing or empty parameter "ref"', 400
+
     if distro.lower() in ['rhel', 'centos']:
-        if ref:
-            return find_rpm_repo(distro, releasever, arch, url, ref, allow_old)
-        else:
-            return 'Error: missing or empty paramster "ref"', 400
+        return find_rpm_repo(distro, releasever, arch, url, commit, allow_old)
     elif distro.lower() in ['debian', 'ubuntu']:
-        if ref:
-            return generate_deb_repo(distro, releasever, arch, url, ref,
-                                     allow_old)
-        else:
-            return 'Error: missing or empty parameter "ref"', 400
+        return generate_deb_repo(distro, releasever, arch, url, commit,
+                                 allow_old)
     else:
         return 'Error: unknown distro "%s"' % distro, 400
 
 
-def generate_deb_repo(distro, release, arch, url, commit=None, allow_old=False):
-    if distro not in ['ubuntu', 'debian']:
-        return "Error: Invalid distro.", 400
-    if release not in ['lucid', 'precise', 'sid']:
-        return "Error: Invalid release.", 400
+def generate_deb_repo(distro, release, arch, url, commit, allow_old=False):
+    if (distro, release) not in (('ubuntu', 'lucid'),
+                                 ('ubuntu', 'precise'),
+                                 ('debian', 'sid')):
+        return 'Error: invalid release:  %s %s' % (distro, release), 400
     if url.endswith("eucalyptus"):
         package_name = "eucalyptus"
     elif url.endswith("internal"):
         package_name = "eucalyptus-enterprise"
     else:
-        return ("Error: Invalid url.  Please end your URL with 'eucalyptus' "
-                "or 'internal'"), 400
+        return ('Error: Invalid url.  Please end your URL with "eucalyptus" '
+                'or "internal"'), 400
 
-    # If no hash is specified, grab latest version and determine its hash
-    if commit is None or commit == "master":
-        sources = os.path.join(REPO_FS_BASE, distro, dists, release,
-                               '/main/source/Sources.gz')
-        f = gzip.open(sources, 'rb')
-        data = f.read()
-        f.close()
-        latest_ver = None
-        for section in data.split("\n\n"):
-            if section.startswith("Package: " + package_name + "\n"):
-                lines = section.split("\n")
-                for line in lines:
-                    if line.startswith("Version"):
-                        key,val = line.split(": ")
-                        latest_ver = val
-                        break
-        # We should have the latest version set at this point, but we won't if
-        # the user specified an invalid distro or release. Bail!
-        if latest_ver is None:
-            return ('Error: Something wacky happened - unable to determine '
-                    'package version'), 400
-        # Parse the version to obtain the git hash.  This will be used for the
-        # new repo name
-        fields = latest_ver.split(".")
-        commit = fields[-1][3:]
-
-    # if QA passes us an entire commit ID, truncate
-    elif len(commit) > 6:
-        commit = commit[0:6]
+    # Truncate to 6 characters
+    commit = commit[:6]
 
     # Locate debs
     pool = os.path.join(REPO_FS_BASE, distro, 'pool/main/e', package_name)
@@ -174,7 +150,7 @@ def find_rpm_repo_dir(commit):
         raise KeyError('Ref "%s" matches multiple commits' % commit)
     return None
 
-def find_rpm_repo(distro, releasever, arch, url, ref, allow_old=False):
+def find_rpm_repo(distro, releasever, arch, url, commit, allow_old=False):
     # Quick sanity checks
     if arch == 'amd64':
         return 'Error: bad arch "amd64"; try "x86_64" instead', 400
@@ -184,7 +160,7 @@ def find_rpm_repo(distro, releasever, arch, url, ref, allow_old=False):
         releasever = releasever[0]
 
     try:
-        commit = resolve_git_ref(url, ref)
+        commit = resolve_git_ref(url, commit)
         commitdir = find_rpm_repo_dir(commit)
     except KeyError as err:
         return 'Error: %s' % err.msg, 412
