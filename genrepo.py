@@ -265,7 +265,7 @@ def setup_result_cache(filename):
 
 
 if __name__ == '__main__':
-    app.debug = True
+    app.debug = False
     try:
         setup_result_cache(RESULT_CACHE_FILENAME)
         app.run(host='0.0.0.0')
