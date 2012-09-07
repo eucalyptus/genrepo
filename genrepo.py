@@ -39,12 +39,22 @@ def genrepo_main():
     return tuple(response_bits)
 
 
-@app.route('/genrepo/cache/', methods=['DELETE'])
-def clear_cache():
-    with RESULT_CACHE_LOCK:
-        RESULT_CACHE['results'].clear()
-        RESULT_CACHE.sync()
-    return '', 204
+@app.route('/genrepo/cache/', methods=['GET', 'DELETE'])
+def do_cache():
+    if request.method == 'GET':
+        cached_results = []
+        for key, val in RESULT_CACHE['results'].items():
+            cached_results.append(' '.join(key +
+                    (str(val['atime']), str(val['mtime']), val['result'])))
+        cached_results_str = '\n'.join(cached_results)
+        if cached_results_str:
+            cached_results_str += '\n'
+        return cached_results_str, 200
+    elif request.method == 'DELETE':
+        with RESULT_CACHE_LOCK:
+            RESULT_CACHE['results'].clear()
+            RESULT_CACHE.sync()
+        return '', 204
 
 
 def get_git_pkgs():
