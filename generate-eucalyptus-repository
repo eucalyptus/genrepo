@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -x
+set -e
+
+if [ "$#" -lt 3 ] ; then
+  echo "Usage: $0 <distro> <release> <commit>-<timestamp>" >&2
+  exit 1
+fi
+
+DISTRO=$1
+RELEASE=$2
+COMMIT=`echo $3|awk -F"-" '{print $1}'`
+TIMESTAMP=`echo $3|awk -F"-" '{print $2}'`
+
+#echo $DISTRO
+#echo $RELEASE
+#echo $COMMIT
+#echo $TIMESTAMP
+
+if [ -z "${REPOSITORY:-}" ] ; then
+  REPOSITORY="/srv/release/repository/release/$DISTRO"
+fi
+
+cat >> "${REPOSITORY}"/conf/distributions << EOF
+
+Codename: $RELEASE-$COMMIT-$TIMESTAMP
+AlsoAcceptFor: unstable $RELEASE-$COMMIT-$TIMESTAMP
+Architectures: amd64 i386 source
+Components: main
+DebIndices: Packages Release . .gz
+DscIndices: Sources Release .gz
+Tracking: minimal
+EOF
