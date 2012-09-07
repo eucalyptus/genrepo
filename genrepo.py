@@ -159,7 +159,7 @@ def generate_deb_repo(distro, release, arch, url, commit):
 
     for euca_file in pool_contents:
         if (current_high_ver in euca_file and release in euca_file and
-            euca_file.ends_with('.deb')):
+            euca_file.endswith('.deb')):
             try:
                 subprocess.check_call(
                         ['reprepro', '--keepunreferencedfiles', '-V', '-b',
@@ -168,8 +168,8 @@ def generate_deb_repo(distro, release, arch, url, commit):
             except subprocess.CalledProcessError:
                 return 'Error: failed to add DEBs to new repo', 500
     # Return the repo information
-    return ' '.join(('deb', urlparse.urljoin(REPO_HTTP_BASE, 'ubuntu'),
-                     'main')), 201
+    return ' '.join(('deb', urlparse.urljoin(REPO_HTTP_BASE, distro),
+                     current_repo_name, 'main')), 201
 
 
 def find_rpm_repo_dirs(commit):
