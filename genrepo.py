@@ -23,7 +23,7 @@ RESULT_CACHE_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
-@app.route('/genrepo/', methods=['GET', 'POST'])
+@app.route('/api/1/genrepo/', methods=['GET', 'POST'])
 def genrepo_main():
     response_bits = list(get_git_pkgs())
     if len(response_bits) == 1:
@@ -39,7 +39,7 @@ def genrepo_main():
     return tuple(response_bits)
 
 
-@app.route('/genrepo/cache/', methods=['GET', 'DELETE'])
+@app.route('/api/1/genrepo/cache/', methods=['GET', 'DELETE'])
 def do_cache():
     if request.method == 'GET':
         cached_results = []
