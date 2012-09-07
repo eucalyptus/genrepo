@@ -4,22 +4,22 @@ import apt
 from flask import Flask, request
 import os
 import os.path
+import shelve
 import subprocess
 import threading
 import time
 import urlparse
 
-# Since the only way we can have two commits with the same ID is by causing
-# SHA1 to collide, we ignore that scenario and simply check each possible
-# location in turn until we find one with a matching commit ID.
 ## FIXME:  This should go into a config file.
 REPO_FS_BASE   = '/srv/release/repository/release'
 REPO_HTTP_BASE = 'http://packages.release.eucalyptus-systems.com/'
 RPM_FS_BASE    = os.path.join(REPO_FS_BASE, 'yum/builds')
 RPM_HTTP_BASE  = urlparse.urljoin(REPO_HTTP_BASE, 'yum/builds/')
+RESULT_CACHE_FILENAME = '/var/lib/genrepo/result-cache'
 
-BRANCH_COMMITS = {}
-BRANCH_COMMITS_LOCK = threading.Lock()
+# A python shelf object:  the lazy man's key-value store
+RESULT_CACHE = None
+RESULT_CACHE_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
@@ -37,6 +37,15 @@ def genrepo_main():
     if isinstance(response_bits[0], list):
         response_bits[0] = '\n'.join(response_bits[0])
     return tuple(response_bits)
+
+
+@app.route('/genrepo/cache/', methods=['DELETE'])
+def clear_cache():
+    with RESULT_CACHE_LOCK:
+        RESULT_CACHE['results'].clear()
+        RESULT_CACHE.sync()
+    return '', 204
+
 
 def get_git_pkgs():
     if request.method == 'POST':
@@ -63,15 +72,34 @@ def get_git_pkgs():
         return 'Error: missing or empty parameter "ref"', 400
 
     if distro.lower() in ['rhel', 'centos']:
-        return find_rpm_repo(distro, releasever, arch, url, commit, allow_old)
+        msg, code = find_rpm_repo(distro, releasever, arch, url, commit)
     elif distro.lower() in ['debian', 'ubuntu']:
-        return generate_deb_repo(distro, releasever, arch, url, commit,
-                                 allow_old)
+        msg, code = generate_deb_repo(distro, releasever, arch, url, commit)
     else:
         return 'Error: unknown distro "%s"' % distro, 400
 
+    # Don't mess with the cache if ref was a commit ID
+    if (any(char not in '01234567890abcdef' for char in ref.lower()) or
+        not commit.startswith(ref.lower())):
 
-def generate_deb_repo(distro, release, arch, url, commit, allow_old=False):
+        cache_key = (distro, releasever, arch, url, ref)
+        with RESULT_CACHE_LOCK:
+            if code <= 201:
+                # Cache the result
+                now = time.time()
+                RESULT_CACHE['results'][cache_key] = {'atime': now,
+                                                      'mtime': now,
+                                                      'result': msg}
+            elif code >= 400 and allow_old:
+                # Try to use a cached result
+                if cache_key in RESULT_CACHE['results']:
+                    RESULT_CACHE['results'][cache_key]['atime'] = time.time()
+                    return RESULT_CACHE['results'][cache_key]['result'], 200
+
+    return msg, code
+
+
+def generate_deb_repo(distro, release, arch, url, commit):
     if (distro, release) not in (('ubuntu', 'lucid'),
                                  ('ubuntu', 'precise'),
                                  ('debian', 'sid')):
@@ -151,7 +179,8 @@ def find_rpm_repo_dirs(commit):
         raise KeyError('Ref "%s" matches multiple commits' % commit)
     # Fall through with no results
 
-def find_rpm_repo(distro, releasever, arch, url, commit, allow_old=False):
+
+def find_rpm_repo(distro, releasever, arch, url, commit):
     # Quick sanity checks
     if arch == 'amd64':
         return 'Error: bad arch "amd64"; try "x86_64" instead', 400
@@ -166,21 +195,17 @@ def find_rpm_repo(distro, releasever, arch, url, commit, allow_old=False):
     except KeyError as err:
         return 'Error: %s' % err.msg, 412
 
-    with BRANCH_COMMITS_LOCK:
-        ospath = os.path.sep.join((distro, releasever, arch))
-        for commitdir in commitdirs:
-            if os.path.exists(os.path.join(RPM_FS_BASE, commitdir, ospath)):
-                BRANCH_COMMITS[ref] = commitdir
-                cos_path = '/'.join((commitdir, ospath))
-                return urlparse.urljoin(RPM_HTTP_BASE, cos_path), 200
-        elif allow_old and ref in BRANCH_COMMITS:
-            # Try the last known commit
-            commitdir = BRANCH_COMMITS[ref]
+    # Since the only way we can have two commits with the same ID is by causing
+    # SHA1 to collide, we ignore that scenario and simply check each possible
+    # location in turn until we find one with a matching commit ID.
+    ospath = os.path.sep.join((distro, releasever, arch))
+    for commitdir in commitdirs:
+        if os.path.exists(os.path.join(RPM_FS_BASE, commitdir, ospath)):
             cos_path = '/'.join((commitdir, ospath))
-            if os.path.exists(os.path.join(basedir, cos_path)):
-                return urlparse.urljoin(RPM_HTTP_BASE, cos_path), 200
-        return ('Error: no repo found for ref %s on platform %s' %
-                (ref, ospath), 404)
+            return urlparse.urljoin(RPM_HTTP_BASE, cos_path), 200
+    return ('Error: no repo found for ref %s on platform %s' %
+            (commit, ospath), 404)
+
 
 def resolve_git_ref(url, ref):
     matches = set()
@@ -201,6 +226,41 @@ def resolve_git_ref(url, ref):
     else:
         raise KeyError('Ref "%s" matches multiple objects' % ref)
 
+
+def do_cache_upkeep():
+    while True:
+        time.sleep(300)
+        with RESULT_CACHE_LOCK:
+            if RESULT_CACHE is not None:
+                # Clean out old results
+                expiry = time.time() - 604800  # one week ago
+                for entry in RESULT_CACHE['results'].keys():
+                    if RESULT_CACHE['results'][entry]['atime'] < expiry:
+                        del RESULT_CACHE['results'][entry]
+                RESULT_CACHE.sync()
+
+
+def setup_result_cache(filename):
+    global RESULT_CACHE
+    RESULT_CACHE = shelve.open(filename, writeback=True)
+
+    if 'version' not in RESULT_CACHE:
+        RESULT_CACHE['version'] = 1
+    if 'results' not in RESULT_CACHE:
+        RESULT_CACHE['results'] = {}
+
+    cache_upkeep_thread = threading.Thread(target=do_cache_upkeep)
+    cache_upkeep_thread.daemon = True
+    cache_upkeep_thread.start()
+
+
 if __name__ == '__main__':
-    app.debug = False
-    app.run(host='0.0.0.0')
+    app.debug = True
+    try:
+        setup_result_cache(RESULT_CACHE_FILENAME)
+        app.run(host='0.0.0.0')
+    finally:
+        with RESULT_CACHE_LOCK:
+            if RESULT_CACHE:
+                RESULT_CACHE.close()
+                RESULT_CACHE = None
