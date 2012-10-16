@@ -13,7 +13,7 @@ import urlparse
 ## FIXME:  This should go into a config file.
 REPO_FS_BASE   = '/srv/release/repository/release'
 REPO_HTTP_BASE = 'http://packages.release.eucalyptus-systems.com/'
-YUM_BASE       = 'yum/builds'
+YUM_BASE       = 'yum/builds/'
 RPM_FS_BASE    = os.path.join(REPO_FS_BASE, YUM_BASE)
 RPM_HTTP_BASE  = urlparse.urljoin(REPO_HTTP_BASE, YUM_BASE)
 RESULT_CACHE_FILENAME = '/var/lib/genrepo/result-cache'
