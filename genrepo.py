@@ -13,8 +13,9 @@ import urlparse
 ## FIXME:  This should go into a config file.
 REPO_FS_BASE   = '/srv/release/repository/release'
 REPO_HTTP_BASE = 'http://packages.release.eucalyptus-systems.com/'
-RPM_FS_BASE    = os.path.join(REPO_FS_BASE, 'yum/builds')
-RPM_HTTP_BASE  = urlparse.urljoin(REPO_HTTP_BASE, 'yum/builds/')
+YUM_BASE       = 'yum/builds'
+RPM_FS_BASE    = os.path.join(REPO_FS_BASE, YUM_BASE)
+RPM_HTTP_BASE  = urlparse.urljoin(REPO_HTTP_BASE, YUM_BASE)
 RESULT_CACHE_FILENAME = '/var/lib/genrepo/result-cache'
 
 # A python shelf object:  the lazy man's key-value store
@@ -26,6 +27,22 @@ app = Flask(__name__)
 @app.route('/api/1/genrepo/', methods=['GET', 'POST'])
 def genrepo_main():
     response_bits = list(get_git_pkgs())
+    if len(response_bits) == 1:
+        response_bits.append(200)
+    if len(response_bits) == 2:
+        response_bits.append({'Content-Type': 'text/plain'})
+
+    if (isinstance(response_bits[0], basestring) and
+        not response_bits[0].endswith('\n')):
+        response_bits[0] += '\n'
+    if isinstance(response_bits[0], list):
+        response_bits[0] = '\n'.join(response_bits[0])
+    return tuple(response_bits)
+
+
+@app.route('/api/1/genrepo/commit/', methods=['GET'])
+def genrepo_commit_main():
+    response_bits = list(get_commit_repo())
     if len(response_bits) == 1:
         response_bits.append(200)
     if len(response_bits) == 2:
@@ -55,6 +72,27 @@ def do_cache():
             RESULT_CACHE['results'].clear()
             RESULT_CACHE.sync()
         return '', 204
+
+
+def get_commit_repo():
+    params = request.args
+    for param in ['ref', 'url']:
+        if not params.get(param):
+            return ('Error: missing or empty required parameter "%s"' % param,
+                    400)
+    url = params.get('url')
+    ref = params.get('ref')
+
+    try:
+        commit = resolve_git_ref(url, ref)
+        if commit:
+            for commitdir in find_rpm_repo_dirs(commit):
+                if os.path.exists(os.path.join(RPM_FS_BASE, commitdir)):
+                    return os.path.join(YUM_BASE, commitdir), 200
+        return ('Error: no build commit found for ref %s on repository %s' %
+            (commit, url), 404)
+    except KeyError as err:
+        return 'Error: %s' % err.msg, 412
 
 
 def get_git_pkgs():
