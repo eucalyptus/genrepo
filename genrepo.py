@@ -4,6 +4,7 @@ import apt
 from flask import Flask, request
 import os
 import os.path
+import re
 import shelve
 import subprocess
 import threading
@@ -118,6 +119,8 @@ def get_git_pkgs():
             return 'Error: ' + exc.message, 412
     else:
         return 'Error: missing or empty parameter "ref"', 400
+
+    url = normalize_git_url(url)
 
     if distro.lower() in ['rhel', 'centos']:
         msg, code = find_rpm_repo(distro, releasever, arch, url, commit)
@@ -275,6 +278,19 @@ def resolve_git_ref(url, ref):
         raise KeyError('Ref "%s" matches multiple objects' % ref)
 
 
+def normalize_git_url(url):
+    # Normalize the URL
+    # Don't forget that re.match only searches from the start of the string.
+    match = re.match('([^@]+)@([^:]+):(.*)', url)
+    if match:
+        groups = match.groups()
+        return 'git+ssh://{0}@{1}/{2}'.format(groups[0], groups[1], groups[2])
+    match = re.match('ssh://[^@]+@.+/.*', url)
+    if match:
+        return 'git+' + url
+    return url
+
+
 def do_cache_upkeep():
     while True:
         time.sleep(300)
@@ -292,14 +308,39 @@ def setup_result_cache(filename):
     global RESULT_CACHE
     RESULT_CACHE = shelve.open(filename, writeback=True)
 
-    if 'version' not in RESULT_CACHE:
-        RESULT_CACHE['version'] = 1
-    if 'results' not in RESULT_CACHE:
-        RESULT_CACHE['results'] = {}
+    migrate_0_1()
+    migrate_1_2()
 
     cache_upkeep_thread = threading.Thread(target=do_cache_upkeep)
     cache_upkeep_thread.daemon = True
     cache_upkeep_thread.start()
+
+
+def migrate_0_1():
+    if 'version' not in RESULT_CACHE or RESULT_CACHE['version'] < 1:
+        print 'Creating new database'
+        if 'version' not in RESULT_CACHE:
+            RESULT_CACHE['version'] = 1
+        if 'results' not in RESULT_CACHE:
+            RESULT_CACHE['results'] = {}
+
+
+def migrate_1_2():
+    if RESULT_CACHE['version'] == 1:
+        print 'Migrating database from version 1 to 2'
+        for old_key in RESULT_CACHE['results'].keys():
+            # Normalize the URL
+            # Don't forget that re.match only searches from the start of the string.
+            old_url = old_key[3]
+            new_url = normalize_git_url(old_url)
+            if new_url != old_url:
+                print 'Migrating', old_url, 'to', new_url
+                new_key = list(old_key)
+                new_key[3] = new_url
+                new_key = tuple(new_key)
+                RESULT_CACHE['results'][new_key] = RESULT_CACHE['results'][old_key]
+                del RESULT_CACHE['results'][old_key]
+    RESULT_CACHE['version'] = 2
 
 
 if __name__ == '__main__':
