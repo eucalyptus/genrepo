@@ -281,6 +281,8 @@ def resolve_git_ref(url, ref):
 def normalize_git_url(url):
     # Normalize the URL
     # Don't forget that re.match only searches from the start of the string.
+    if url.endswith('.git'):
+        url = url[:-4]
     match = re.match('([^@]+)@([^:]+):(.*)', url)
     if match:
         groups = match.groups()
