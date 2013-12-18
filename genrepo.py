@@ -25,85 +25,17 @@ RESULT_CACHE_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
+
 @app.route('/api/1/genrepo/', methods=['GET', 'POST'])
-def genrepo_main():
-    response_bits = list(get_git_pkgs())
-    if len(response_bits) == 1:
-        response_bits.append(200)
-    if len(response_bits) == 2:
-        response_bits.append({'Content-Type': 'text/plain'})
-
-    if (isinstance(response_bits[0], basestring) and
-        not response_bits[0].endswith('\n')):
-        response_bits[0] += '\n'
-    if isinstance(response_bits[0], list):
-        response_bits[0] = '\n'.join(response_bits[0])
-    return tuple(response_bits)
-
-
-@app.route('/api/1/genrepo/commit/', methods=['GET'])
-def genrepo_commit_main():
-    response_bits = list(get_commit_repo())
-    if len(response_bits) == 1:
-        response_bits.append(200)
-    if len(response_bits) == 2:
-        response_bits.append({'Content-Type': 'text/plain'})
-
-    if (isinstance(response_bits[0], basestring) and
-        not response_bits[0].endswith('\n')):
-        response_bits[0] += '\n'
-    if isinstance(response_bits[0], list):
-        response_bits[0] = '\n'.join(response_bits[0])
-    return tuple(response_bits)
-
-
-@app.route('/api/1/genrepo/cache/', methods=['GET', 'DELETE'])
-def do_cache():
-    if request.method == 'GET':
-        cached_results = []
-        for key, val in RESULT_CACHE['results'].items():
-            cached_results.append(' '.join(key +
-                    (str(val['atime']), str(val['mtime']), val['result'])))
-        cached_results_str = '\n'.join(cached_results)
-        if cached_results_str:
-            cached_results_str += '\n'
-        return cached_results_str, 200
-    elif request.method == 'DELETE':
-        with RESULT_CACHE_LOCK:
-            RESULT_CACHE['results'].clear()
-            RESULT_CACHE.sync()
-        return '', 204
-
-
-def get_commit_repo():
-    params = request.args
-    for param in ['ref', 'url']:
-        if not params.get(param):
-            return ('Error: missing or empty required parameter "%s"' % param,
-                    400)
-    url = params.get('url')
-    ref = params.get('ref')
-
-    try:
-        commit = resolve_git_ref(url, ref)
-        if commit:
-            for commitdir in find_rpm_repo_dirs(commit):
-                if os.path.exists(os.path.join(RPM_FS_BASE, commitdir)):
-                    return os.path.join(YUM_BASE, commitdir), 200
-        return ('Error: no build commit found for ref %s on repository %s' %
-            (commit, url), 404)
-    except KeyError as err:
-        return 'Error: %s' % err.msg, 412
-
-
-def get_git_pkgs():
+def do_genrepo():
     if request.method == 'POST':
         params = request.form
     elif request.method == 'GET':
         params = request.args
     for param in ['distro', 'releasever', 'arch', 'url']:
         if not params.get(param):
-            return ('Error: missing or empty required parameter "%s"' % param,
+            return format_plaintext_response(
+                    'Error: missing or empty required parameter "%s"' % param,
                     400)
     distro     = params.get('distro')
     releasever = params.get('releasever')
@@ -116,38 +48,78 @@ def get_git_pkgs():
         try:
             commit = resolve_git_ref(url, ref)
         except KeyError as exc:
-            return 'Error: ' + exc.message, 412
+            return format_plaintext_response('Error: ' + exc.message, 412)
     else:
-        return 'Error: missing or empty parameter "ref"', 400
+        return format_plaintext_response(
+                'Error: missing or empty parameters "ref"', 400)
 
     url = normalize_git_url(url)
 
-    if distro.lower() in ['rhel', 'centos']:
-        msg, code = find_rpm_repo(distro, releasever, arch, url, commit)
-    elif distro.lower() in ['debian', 'ubuntu']:
-        msg, code = generate_deb_repo(distro, releasever, arch, url, commit)
-    else:
-        return 'Error: unknown distro "%s"' % distro, 400
+    msg, code = get_git_pkgs(distro, releasever, arch, url, commit)
 
     # Don't mess with the cache if ref was a commit ID
     if (any(char not in '01234567890abcdef' for char in ref.lower()) or
         not commit.startswith(ref.lower())):
 
-        cache_key = (distro, releasever, arch, url, ref)
-        with RESULT_CACHE_LOCK:
-            if code <= 201:
-                # Cache the result
-                now = time.time()
-                RESULT_CACHE['results'][cache_key] = {'atime': now,
-                                                      'mtime': now,
-                                                      'result': msg}
-            elif code >= 400 and allow_old:
-                # Try to use a cached result
-                if cache_key in RESULT_CACHE['results']:
-                    RESULT_CACHE['results'][cache_key]['atime'] = time.time()
-                    return RESULT_CACHE['results'][cache_key]['result'], 200
+        if code <= 201:
+            # Cache the result
+            update_cache(distro, releasever, arch, url, ref, msg)
+        elif code >= 400 and allow_old:
+            # Try to use a cached result
+            cached_msg = check_cache(distro, releasever, arch, url, ref)
+            if cached_msg is not None:
+                msg  = cached_msg
+                code = 200
+    return format_plaintext_response(msg, code)
 
-    return msg, code
+
+@app.route('/api/1/genrepo/cache/', methods=['GET', 'DELETE', 'PUT'])
+def do_genrepo_cache():
+    if request.method == 'GET':
+        cached_results = []
+        for key, val in RESULT_CACHE['results'].items():
+            cached_results.append(' '.join(key +
+                    (str(val['atime']), str(val['mtime']), val['result'])))
+        return format_plaintext_response(cached_results, 200)
+    elif request.method == 'DELETE':
+        with RESULT_CACHE_LOCK:
+            RESULT_CACHE['results'].clear()
+            RESULT_CACHE.sync()
+        return format_plaintext_response('', 204)
+    elif request.method == 'PUT':
+        for param in ['distro', 'releasever', 'arch', 'url', 'ref', 'commit']:
+            if not request.form.get(param):
+                return format_plaintext_response(
+                        ('Error: missing or empty required parameter '
+                         '"%s"') % param, 400)
+        distro     = request.form.get('distro')
+        releasever = request.form.get('releasever')
+        arch       = request.form.get('arch')
+        url        = request.form.get('url')
+        ref        = request.form.get('ref')
+        commit     = request.form.get('commit')
+
+        if len(commit) != 40 or not all(c in '0123456789abcdef' for c in commit):
+            return format_plaintext_response(
+                    'Error: commit must be a 40-character commit hash', 400)
+
+        url = normalize_git_url(url)
+
+        msg, code = get_git_pkgs(distro, releasever, arch, url, commit)
+        if code < 300:
+            update_cache(distro, releasever, arch, url, ref, msg)
+            return format_plaintext_response('', 204)
+        else:
+            return format_plaintext_response(msg, code)
+
+
+def get_git_pkgs(distro, releasever, arch, url, commit):
+    if distro.lower() in ['rhel', 'centos']:
+        return find_rpm_repo(distro, releasever, arch, url, commit)
+    elif distro.lower() in ['debian', 'ubuntu']:
+        return generate_deb_repo(distro, releasever, arch, url, commit)
+    else:
+        return 'Error: unknown distro "%s"' % distro, 400
 
 
 def generate_deb_repo(distro, release, arch, url, commit):
@@ -291,6 +263,44 @@ def normalize_git_url(url):
     if match:
         return 'git+' + url
     return url
+
+
+def format_plaintext_response(msg=None, code=None, headers=None):
+    if msg is None:
+        msg = ''
+    elif isinstance(msg, basestring) and not msg.endswith('\n'):
+        msg += '\n'
+    elif isinstance(msg, list):
+        msg = '\n'.join(msg)
+        if msg:
+            msg += '\n'
+
+    if code is None:
+        code = 200
+
+    if headers is None:
+        headers = {'Content-Type': 'text/plain'}
+
+    return (msg, code, headers)
+
+
+def update_cache(distro, releasever, arch, url, ref, result):
+    cache_key = (distro, releasever, arch, url, ref)
+    with RESULT_CACHE_LOCK:
+        now = time.time()
+        RESULT_CACHE['results'][cache_key] = {'atime': now,
+                                              'mtime': now,
+                                              'result': result}
+        RESULT_CACHE.sync()
+
+
+def check_cache(distro, releasever, arch, url, ref):
+    cache_key = (distro, releasever, arch, url, ref)
+    with RESULT_CACHE_LOCK:
+        if cache_key in RESULT_CACHE['results']:
+            RESULT_CACHE['results'][cache_key]['atime'] = time.time()
+            return RESULT_CACHE['results'][cache_key]['result']
+    return None
 
 
 def do_cache_upkeep():
